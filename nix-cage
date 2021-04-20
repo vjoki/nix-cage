@@ -32,6 +32,7 @@ def get_default_config():
     ]
     tmpfs.extend(["/run/user/{UID}".format(**environ)]   if "UID"  in environ else [])
     tmpfs.extend(["/run/media/{USER}".format(**environ)] if "USER" in environ else [])
+    tmpfs.extend(["/tmp/.private/{USER}".format(**environ)] if "USER" in environ else [])
 
     def set_from_env(k, r, key=None):
         if k in environ:
