@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from argparse import ArgumentParser
-from os import execve, getcwd, chdir, makedirs
+from pathlib import Path
+from os import execve, getcwd, chdir
 from os.path import isabs, abspath, expanduser, basename, realpath, exists
 from shutil import which
 from shlex import quote as shell_escape
@@ -237,7 +238,8 @@ def load_config(config, arguments, rest):
 
 def ensure_prerequisites(config):
     initializers = {
-        "d": lambda item: makedirs(item[0], exist_ok=True),
+        "d": lambda item: Path(item[0]).mkdir(parents=True, exist_ok=True),
+        "f": lambda item: Path(item[0]).touch(exist_ok=True),
     }
 
     for k, v in config["mounts"].items():
