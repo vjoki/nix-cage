@@ -55,6 +55,7 @@ def get_default_config():
 
     args = {
         "bwrap": [
+            "--new-session",
             "--die-with-parent",
             "--unshare-ipc",
             "--unshare-cgroup",
