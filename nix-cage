@@ -274,6 +274,10 @@ def main(arguments, rest=[]):
         config["arguments"]["bwrap"].append("--seccomp")
         config["arguments"]["bwrap"].append("{}".format(seccomp_fd))
 
+    if arguments["proc"]:
+        config["arguments"]["bwrap"].append("--proc")
+        config["arguments"]["bwrap"].append(arguments["proc"])
+
     command, flags = make_command(config)
     stderr.write(" ".join(flags) + "\n")
 
@@ -301,6 +305,7 @@ if __name__ == "__main__":
     p.add_argument("--config", help="config file path", default="nix-cage.json")
     p.add_argument("--command", help="command to execute inside the sandbox")
     p.add_argument("--seccomp", help="compiled seccomp BPF file")
+    p.add_argument("--proc", help="mount procfs")
     p.add_argument("--show-config", help="dumps config in JSON and exit", action="store_true")
     p.add_argument("--cd", "-C", help="change to directory before doing anything", default=getcwd())
 
