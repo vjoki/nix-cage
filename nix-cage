@@ -24,7 +24,7 @@ mount_suffixes = [
 def get_default_config():
     rw = ["."]
     ro = ["/"]
-    dev = ["/dev"]
+    dev = []
     tmpfs = [
         "/tmp",
         "/home",
@@ -278,6 +278,10 @@ def main(arguments, rest=[]):
         config["arguments"]["bwrap"].append("--proc")
         config["arguments"]["bwrap"].append(arguments["proc"])
 
+    if arguments["devtmpfs"]:
+        config["arguments"]["bwrap"].append("--dev")
+        config["arguments"]["bwrap"].append(arguments["devtmpfs"])
+
     command, flags = make_command(config)
     stderr.write(" ".join(flags) + "\n")
 
@@ -305,7 +309,8 @@ if __name__ == "__main__":
     p.add_argument("--config", help="config file path", default="nix-cage.json")
     p.add_argument("--command", help="command to execute inside the sandbox")
     p.add_argument("--seccomp", help="compiled seccomp BPF file")
-    p.add_argument("--proc", help="mount procfs")
+    p.add_argument("--proc", help="mount procfs to PROC")
+    p.add_argument("--devtmpfs", help="mount a new devtmpfs to DEVTMPFS")
     p.add_argument("--show-config", help="dumps config in JSON and exit", action="store_true")
     p.add_argument("--cd", "-C", help="change to directory before doing anything", default=getcwd())
 
