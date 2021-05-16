@@ -59,6 +59,7 @@ def get_default_config():
             "--unshare-ipc",
             "--unshare-cgroup",
             "--unshare-uts",
+            "--unshare-pid",
             "--hostname", "localhost"
         ],
         "nix-shell":  [],
