@@ -276,7 +276,7 @@ def main(arguments, rest=[]):
     ensure_prerequisites(config)
 
     seccomp_fd = None
-    if exists(arguments["seccomp"]):
+    if arguments["seccomp"] and exists(arguments["seccomp"]):
         seccomp_fd = os.open(abspath(expanduser(arguments["seccomp"])), os.O_RDONLY)
         os.set_inheritable(seccomp_fd, True)
         config["arguments"]["bwrap"].append("--seccomp")
