@@ -290,6 +290,10 @@ def main(arguments, rest=[]):
         config["arguments"]["bwrap"].append("--dev")
         config["arguments"]["bwrap"].append(arguments["devtmpfs"])
 
+    if arguments["ro_root"]:
+        config["arguments"]["bwrap"].append("--remount-ro")
+        config["arguments"]["bwrap"].append("/")
+
     command, flags = make_command(config)
     stderr.write(" ".join(flags) + "\n")
 
@@ -320,6 +324,7 @@ if __name__ == "__main__":
     p.add_argument("--seccomp", help="compiled seccomp BPF file")
     p.add_argument("--proc", help="mount procfs to PROC")
     p.add_argument("--devtmpfs", help="mount a new devtmpfs to DEVTMPFS")
+    p.add_argument("--ro-root", help="Read only root", action="store_true")
     p.add_argument("--show-config", help="dumps config in JSON and exit", action="store_true")
     p.add_argument("--cd", "-C", help="change to directory before doing anything", default=getcwd())
 
