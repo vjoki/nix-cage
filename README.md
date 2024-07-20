@@ -15,18 +15,46 @@ Sandboxed environments with `bwrap` and `nix` package manager.
 
 For basic usage there are 2 steps:
 
-- create `shell.nix` with settings you need
+- create `flake.nix` with settings you need
 - start `nix-cage`
 
-Example of `shell.nix`:
+Example of `flake.nix`:
 
 ```nix
-with import <nixpkgs> {};
-stdenv.mkDerivation {
-  name = "nix-shell";
-  buildInputs = [
-    python3
-  ];
+{
+  description = "Generic devShell";
+
+  inputs = {
+    nixpkgs.url      = "github:nixos/nixpkgs/nixos-unstable";
+  };
+
+  outputs = { self, nixpkgs, ... }:
+    let
+      supportedSystems = [ "x86_64-linux" ];
+      forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system: (forSystem system f));
+      forSystem = system: f: f rec {
+        inherit system;
+        pkgs = import nixpkgs {
+          inherit system;
+        };
+        lib = pkgs.lib;
+      };
+    in {
+      devShells = forAllSystems ({ system, pkgs, ... }: {
+        default = nixpkgs.legacyPackages.${system}.stdenvNoCC.mkDerivation {
+          name = "nix-shell";
+          buildInputs = with pkgs; [
+            python3
+          ];
+          NIX_PATH="nixpkgs=${nixpkgs}";
+          LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+          LANG = "en_US.utf8";
+          shellHook = ''
+            cd ~
+          '';
+        };
+      });
+    };
 }
 ```
 
