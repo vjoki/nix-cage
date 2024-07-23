@@ -3,13 +3,12 @@ import os
 from argparse import ArgumentParser
 from pathlib import Path
 from os import execve, getcwd, chdir
-from os.path import isabs, abspath, expanduser, basename, realpath, exists
+from os.path import abspath, expanduser, basename, realpath, exists
 from shutil import which
-from shlex import quote as shell_escape
 from os import environ, sep
 from sys import stderr
 from functools import reduce
-from json import load as json_unmarshal, dump as json_marshal, dumps as json_marshal_str
+from json import load as json_unmarshal, dumps as json_marshal_str
 from pwd import getpwnam
 from string import Template
 from collections import defaultdict
@@ -30,9 +29,10 @@ def get_default_config():
         "/home",
         "/run/user",
         "/run/media",
+        "/tmp/.private",
     ]
-    tmpfs.extend(["/run/user/{UID}".format(**environ)]   if "UID"  in environ else [])
-    tmpfs.extend(["/run/media/{USER}".format(**environ)] if "USER" in environ else [])
+    tmpfs.extend(["/run/user/{UID}".format(**environ)]      if "UID"  in environ else [])
+    tmpfs.extend(["/run/media/{USER}".format(**environ)]    if "USER" in environ else [])
     tmpfs.extend(["/tmp/.private/{USER}".format(**environ)] if "USER" in environ else [])
 
     def set_from_env(k, r, key=None):
@@ -71,10 +71,10 @@ def get_default_config():
     return {
         "mode": "expand",
         "mounts": {
-            "rw":    rw,                          # [(from, to), (from, to), ...] | [to, to, ...]
-            "ro":    ro,                          # [(from, to), (from, to), ...] | [to, to, ...]
-            "dev":   dev,                         # [(from, to), (from, to), ...] | [to, to, ...]
-            "tmpfs": list(filter(exists, tmpfs)), # [to, to, ...]
+            "rw":    rw,                           # [(from, to), (from, to), ...] | [to, to, ...]
+            "ro":    ro,                           # [(from, to), (from, to), ...] | [to, to, ...]
+            "dev":   dev,                          # [(from, to), (from, to), ...] | [to, to, ...]
+            "tmpfs": list(filter(exists, tmpfs)),  # [to, to, ...]
         },
         "environment": env,
         "arguments": args
@@ -108,7 +108,7 @@ def split_path(v):
     return res
 
 def merge(source, destination, mode="expand"):
-    if not mode in set(["expand", "replace"]):
+    if mode not in set(["expand", "replace"]):
         raise RuntimeError("unsupported mode {}, it could be expand or replace".format(mode))
     for key, value in source.items():
         if isinstance(value, dict):
@@ -192,27 +192,33 @@ def make_command(config):
                              else []
                          ), sorted_mounts(config["mounts"])), []))
 
-    dev_mounts = list(reduce(lambda acc, v: acc + v,
-                         map(lambda v: (
-                             ["--dev-bind"      ] + list(v[1][:2]) if v[0] == "dev" and Path(v[1][:2][0]).exists()
-                             else []
-                         ), sorted_mounts(config["mounts"])), []))
+    dev_mounts = list(reduce(
+        lambda acc, v: acc + v,
+        map(lambda v: (
+            ["--dev-bind"] + list(v[1][:2]) if v[0] == "dev" and Path(v[1][:2][0]).exists()
+            else []
+        ), sorted_mounts(config["mounts"])), []
+    ))
 
     env = list(reduce(lambda acc, kv: acc + ["--setenv"] + list(kv),
                       config["environment"].items(), []))
 
     bwrap_devtmpfs = config["arguments"]["devtmpfs"]
     bwrap_flags = config["arguments"]["bwrap"]
-    if Path("flake.nix").exists() or any((p / "flake.nix").exists() for p in Path().resolve().parents):
+    if Path("flake.nix").exists() \
+       or any((p / "flake.nix").exists() for p in Path().resolve().parents):
         shell = [which("nix")]
         shell_flags = ["develop"] + config["arguments"]["nix-develop"] + [
             "--command", config["arguments"]["command"],
         ]
     else:
         shell = [which(environ.get("SHELL", "bash"))]
-        shell_flags = ["-c", config["arguments"]["command"]] if config["arguments"]["command"] else []
+        shell_flags = ["-c", config["arguments"]["command"]] if config["arguments"]["command"] \
+            else []
 
-    return command, [basename(command)] + mounts + bwrap_devtmpfs + dev_mounts + env + bwrap_flags + shell + shell_flags
+    return command, \
+        [basename(command)] + mounts + bwrap_devtmpfs + dev_mounts + env + bwrap_flags \
+        + shell + shell_flags
 
 def load_config(config, arguments, rest):
     if exists(arguments["config"]):
@@ -237,7 +243,9 @@ def load_config(config, arguments, rest):
 
     ##
 
-    expand_mount = lambda v: (abspath(expand(v[0])), abspath(expand(v[1])),) + tuple(v[2:])
+    def expand_mount(v):
+        return (abspath(expand(v[0])), abspath(expand(v[1])),) + tuple(v[2:])
+
     for k, v in config["mounts"].items():
         config["mounts"][k] = [
             expand_mount((v, v,) if type(v) is str else v)
@@ -254,11 +262,11 @@ def ensure_prerequisites(config):
         "f": lambda item: Path(item[0]).touch(exist_ok=True),
     }
 
-    for k, v in config["mounts"].items():
+    for _, v in config["mounts"].items():
         for item in v:
             if len(item) == 3:
-                init = initializers.get(item[2], False)
-                if init:
+                init = initializers.get(item[2])
+                if init is not None:
                     init(item)
 
 def main(arguments, rest=[]):
@@ -300,8 +308,7 @@ def main(arguments, rest=[]):
     stderr.write(" ".join(flags) + "\n")
 
     execve(command, flags, environ)
-    if seccomp_fd:
-        os.close(seccomp_fd)
+
 
 if __name__ == "__main__":
     p = ArgumentParser(
