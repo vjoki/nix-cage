@@ -1,3 +1,13 @@
 {
-    "mounts": {"rw": ["~/.emacs.d",["./.config", "~/.config", "d"]]}
+  "dbus": {
+    "session": {
+      "see": [],
+      "talk": ["org.freedesktop.DBus"],
+      "own": [],
+      "call": ["org.freedesktop.portal.*=*"],
+      "broadcast": ["org.freedesktop.portal.*=@/org/freedesktop/portal/*"]
+    },
+    "system": {}
+  },
+  "mounts": {"rw": ["~/.emacs.d",["./.config", "~/.config", "d"]]}
 }

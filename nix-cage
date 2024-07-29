@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 import os
+import subprocess
+import tempfile
 import fcntl
 from argparse import ArgumentParser
 from pathlib import Path
@@ -32,7 +34,13 @@ def get_default_config():
         "/run/media",
         "/tmp/.private",
     ]
-    tmpfs.extend(["/run/user/{UID}".format(**environ)]      if "UID"  in environ else [])
+
+    xdg_runtime_dir = environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime_dir and exists(xdg_runtime_dir):
+        tmpfs.append(xdg_runtime_dir)
+    else:
+        tmpfs.extend(["/run/user/{UID}".format(**environ)]  if "UID"  in environ else [])
+
     tmpfs.extend(["/run/media/{USER}".format(**environ)]    if "USER" in environ else [])
     tmpfs.extend(["/tmp/.private/{USER}".format(**environ)] if "USER" in environ else [])
 
@@ -45,6 +53,8 @@ def get_default_config():
     set_from_env("TERM", env)
     set_from_env("SHELL", env)
     set_from_env("NIX_REMOTE", env)
+    set_from_env("DBUS_SESSION_BUS_ADDRESS", env)
+    set_from_env("XDG_RUNTIME_DIR", env)
 
     if "NIX_REMOTE" not in env:
         nix_local = [
@@ -71,6 +81,22 @@ def get_default_config():
 
     return {
         "mode": "expand",
+        "dbus": {
+            "system": {
+                "see": [],
+                "talk": [],
+                "own": [],
+                "call": [],
+                "broadcast": [],
+            },
+            "session": {
+                "see": [],
+                "talk": [],
+                "own": [],
+                "call": [],
+                "broadcast": [],
+            },
+        },
         "mounts": {
             "rw":    rw,                           # [(from, to), (from, to), ...] | [to, to, ...]
             "ro":    ro,                           # [(from, to), (from, to), ...] | [to, to, ...]
@@ -182,6 +208,83 @@ def sorted_mounts(mounts):
             key=lambda v: v[0]
         )
     )
+
+def setup_dbus_proxy(config):
+    command = realpathwhich("xdg-dbus-proxy")
+    if not exists(command):
+        return None
+
+    system_rules = []
+    session_rules = []
+    for policy in ["see", "talk", "own", "call", "broadcast"]:
+        if config["dbus"]["system"] and config["dbus"]["system"][policy]:
+            for rule in set(config["dbus"]["system"][policy]):
+                system_rules.extend(["--{}={}".format(policy, rule)])
+
+        if config["dbus"]["session"] and config["dbus"]["session"][policy]:
+            for rule in set(config["dbus"]["session"][policy]):
+                session_rules.extend(["--{}={}".format(policy, rule)])
+
+    if not system_rules and not session_rules:
+        return None
+
+    xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
+    proxy_bus_dir = xdg_runtime_dir / ".nix-cage-dbus-proxy"
+    proxy_bus_dir.mkdir(exist_ok=True)
+
+    system_bus = Path("/run/dbus/system_bus_socket")
+    session_bus = environ.get("DBUS_SESSION_BUS_ADDRESS")
+
+    # Set up file descriptor for syncing xdg-dbus-proxy termination with bwrap. Use pipe, as
+    # bwrap calls close() on the fd on exit, while xdg-dbus-proxy waits until it is closed
+    # (other option would be to use a socket pair).
+    (r_fd, w_fd) = os.pipe()
+    os.set_inheritable(r_fd, True)
+    os.set_inheritable(w_fd, True)
+
+    if system_rules and system_bus.exists():
+        _, system_proxy_bus = tempfile.mkstemp(prefix="system-bus-proxy", dir=proxy_bus_dir)
+
+        # Add mount to config for binding proxy bus to system bus.
+        config["mounts"]["ro"].append((system_proxy_bus, str(system_bus), "f"))
+
+
+        args = ["--fd={}".format(w_fd)] + ["unix:path={}".format(system_bus), system_proxy_bus] + \
+            ["--filter"] + system_rules
+        args_fd = make_args_memfd(args)
+        print(' '.join([basename(command)] + args), file=stderr)
+
+        # Remove the temp file so that xdg-dbus-proxy can create a socket in it's place.
+        os.unlink(system_proxy_bus)
+
+        subprocess.Popen(
+            [basename(command)] + ["--args={}".format(args_fd)],
+            pass_fds=(w_fd, args_fd)
+        )
+
+    if session_rules and session_bus:
+        _, session_proxy_bus = tempfile.mkstemp(prefix="session-bus-proxy", dir=proxy_bus_dir)
+
+        # Add mount to config for binding proxy bus to session bus.
+        bus_path = str(xdg_runtime_dir / "session_bus")
+        config["mounts"]["ro"].append((session_proxy_bus, bus_path, "f"))
+        config["environment"]["DBUS_SESSION_BUS_ADDRESS"] = 'unix:path={}'.format(bus_path)
+
+
+        args = ["--fd={}".format(w_fd)] + [session_bus, session_proxy_bus] + \
+            ["--filter"] + session_rules
+        args_fd = make_args_memfd(args)
+        print(' '.join([basename(command)] + args), file=stderr)
+
+        # Remove the temp file so that xdg-dbus-proxy can create a socket in it's place.
+        os.unlink(session_proxy_bus)
+
+        subprocess.Popen(
+            [basename(command)] + ["--args={}".format(args_fd)],
+            pass_fds=(w_fd, args_fd)
+        )
+
+    return r_fd
 
 def make_args_memfd(args, name="args"):
     args_fd = os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
@@ -325,6 +428,9 @@ def main(arguments, rest=[]):
         config["arguments"]["bwrap"].append("--remount-ro")
         config["arguments"]["bwrap"].append("/")
 
+    sync_fd = setup_dbus_proxy(config)
+    if sync_fd:
+        config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(sync_fd)])
 
     command, argv = make_command(config)
     execve(command, argv, environ)
