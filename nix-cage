@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import os
+import fcntl
 from argparse import ArgumentParser
 from pathlib import Path
 from os import execve, getcwd, chdir
@@ -182,8 +183,22 @@ def sorted_mounts(mounts):
         )
     )
 
+def make_args_memfd(args, name="args"):
+    args_fd = os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    for a in args:
+        os.write(args_fd, str(a).encode() + b'\x00')
+    fcntl.fcntl(
+        args_fd,
+        fcntl.F_ADD_SEALS,
+        fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL
+    )
+    os.lseek(args_fd, 0, os.SEEK_SET)
+
+    return args_fd
+
 def make_command(config):
-    command = realpathwhich("bwrap")
+    bwrap = realpathwhich("bwrap")
+
     mounts = list(reduce(lambda acc, v: acc + v,
                          map(lambda v: (
                              ["--ro-bind"            ] + list(v[1][:2]) if v[0] == "ro"
@@ -205,20 +220,26 @@ def make_command(config):
 
     bwrap_devtmpfs = config["arguments"]["devtmpfs"]
     bwrap_flags = config["arguments"]["bwrap"]
+
     if Path("flake.nix").exists() \
        or any((p / "flake.nix").exists() for p in Path().resolve().parents):
-        shell = [which("nix")]
+        shell = which("nix")
         shell_flags = ["develop"] + config["arguments"]["nix-develop"] + [
             "--command", config["arguments"]["command"],
         ]
     else:
-        shell = [which(environ.get("SHELL", "bash"))]
+        shell = which(environ.get("SHELL", "bash"))
         shell_flags = ["-c", config["arguments"]["command"]] if config["arguments"]["command"] \
             else []
 
-    return command, \
-        [basename(command)] + mounts + bwrap_devtmpfs + dev_mounts + env + bwrap_flags \
-        + shell + shell_flags
+    bwrap_args = mounts + bwrap_devtmpfs + dev_mounts + env + bwrap_flags
+    print(' '.join([basename(bwrap)] + bwrap_args + ["--", shell] + shell_flags), file=stderr)
+
+    args_fd = make_args_memfd(bwrap_args)
+    os.set_inheritable(args_fd, True)
+    argv = [basename(bwrap), "--args", str(args_fd)] + ["--", shell] + shell_flags
+
+    return bwrap, argv
 
 def load_config(config, arguments, rest):
     if exists(arguments["config"]):
@@ -304,10 +325,9 @@ def main(arguments, rest=[]):
         config["arguments"]["bwrap"].append("--remount-ro")
         config["arguments"]["bwrap"].append("/")
 
-    command, flags = make_command(config)
-    stderr.write(" ".join(flags) + "\n")
 
-    execve(command, flags, environ)
+    command, argv = make_command(config)
+    execve(command, argv, environ)
 
 
 if __name__ == "__main__":
