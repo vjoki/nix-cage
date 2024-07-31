@@ -254,9 +254,6 @@ def setup_dbus_proxy(config):
         args_fd = make_args_memfd(args)
         print(' '.join([basename(command)] + args), file=stderr)
 
-        # Remove the temp file so that xdg-dbus-proxy can create a socket in it's place.
-        os.unlink(system_proxy_bus)
-
         subprocess.Popen(
             [basename(command)] + ["--args={}".format(args_fd)],
             pass_fds=(w_fd, args_fd)
@@ -276,8 +273,6 @@ def setup_dbus_proxy(config):
         args_fd = make_args_memfd(args)
         print(' '.join([basename(command)] + args), file=stderr)
 
-        # Remove the temp file so that xdg-dbus-proxy can create a socket in it's place.
-        os.unlink(session_proxy_bus)
 
         subprocess.Popen(
             [basename(command)] + ["--args={}".format(args_fd)],
