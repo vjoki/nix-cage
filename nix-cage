@@ -242,22 +242,16 @@ def setup_dbus_proxy(config):
     os.set_inheritable(r_fd, True)
     os.set_inheritable(w_fd, True)
 
+    args = ["--fd={}".format(w_fd)]
+
     if system_rules and system_bus.exists():
         _, system_proxy_bus = tempfile.mkstemp(prefix="system-bus-proxy", dir=proxy_bus_dir)
 
         # Add mount to config for binding proxy bus to system bus.
         config["mounts"]["ro"].append((system_proxy_bus, str(system_bus), "f"))
 
-
-        args = ["--fd={}".format(w_fd)] + ["unix:path={}".format(system_bus), system_proxy_bus] + \
-            ["--filter"] + system_rules
-        args_fd = make_args_memfd(args)
-        print(' '.join([basename(command)] + args), file=stderr)
-
-        subprocess.Popen(
-            [basename(command)] + ["--args={}".format(args_fd)],
-            pass_fds=(w_fd, args_fd)
-        )
+        args.extend(["unix:path={}".format(system_bus), system_proxy_bus])
+        args.extend(["--filter"] + system_rules)
 
     if session_rules and session_bus:
         _, session_proxy_bus = tempfile.mkstemp(prefix="session-bus-proxy", dir=proxy_bus_dir)
@@ -267,17 +261,18 @@ def setup_dbus_proxy(config):
         config["mounts"]["ro"].append((session_proxy_bus, bus_path, "f"))
         config["environment"]["DBUS_SESSION_BUS_ADDRESS"] = 'unix:path={}'.format(bus_path)
 
-
-        args = ["--fd={}".format(w_fd)] + [session_bus, session_proxy_bus] + \
-            ["--filter"] + session_rules
-        args_fd = make_args_memfd(args)
-        print(' '.join([basename(command)] + args), file=stderr)
+        args.extend([session_bus, session_proxy_bus])
+        args.extend(["--filter"] + session_rules)
 
 
-        subprocess.Popen(
-            [basename(command)] + ["--args={}".format(args_fd)],
-            pass_fds=(w_fd, args_fd)
-        )
+
+    args_fd = make_args_memfd(args)
+    print(' '.join([basename(command)] + args), file=stderr)
+
+    subprocess.Popen(
+        [basename(command)] + ["--args={}".format(args_fd)],
+        pass_fds=(w_fd, args_fd)
+    )
 
     return r_fd
 
