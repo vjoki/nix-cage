@@ -2,12 +2,29 @@
   "dbus": {
     "session": {
       "see": [],
-      "talk": ["org.freedesktop.DBus"],
+      "talk": [
+        "org.freedesktop.DBus",
+        "org.a11y.Bus"
+      ],
       "own": [],
       "call": ["org.freedesktop.portal.*=*"],
       "broadcast": ["org.freedesktop.portal.*=@/org/freedesktop/portal/*"]
     },
-    "system": {}
+    "system": {
+      "log": true
+    },
+    "/run/user/1000/at-spi/bus_0": {
+      "sloppy-names": true,
+      "call": [
+        "org.a11y.atspi.Registry=org.a11y.atspi.Socket.Embed@/org/a11y/atspi/accessible/root",
+        "org.a11y.atspi.Registry=org.a11y.atspi.Socket.Unembed@/org/a11y/atspi/accessible/root",
+        "org.a11y.atspi.Registry=org.a11y.atspi.Registry.GetRegisteredEvents@/org/a11y/atspi/registry",
+        "org.a11y.atspi.Registry=org.a11y.atspi.DeviceEventController.GetKeystrokeListeners@/org/a11y/atspi/registry/deviceeventcontroller",
+        "org.a11y.atspi.Registry=org.a11y.atspi.DeviceEventController.GetDeviceEventListeners@/org/a11y/atspi/registry/deviceeventcontroller",
+        "org.a11y.atspi.Registry=org.a11y.atspi.DeviceEventController.NotifyListenersSync@/org/a11y/atspi/registry/deviceeventcontroller",
+        "org.a11y.atspi.Registry=org.a11y.atspi.DeviceEventController.NotifyListenersAsync@/org/a11y/atspi/registry/deviceeventcontroller"
+      ]
+    }
   },
   "mounts": {"rw": ["~/.emacs.d",["./.config", "~/.config", "d"]]}
 }

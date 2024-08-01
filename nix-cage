@@ -216,6 +216,7 @@ def setup_dbus_proxy(config):
 
     system_rules = []
     session_rules = []
+    other_rules = defaultdict(list)
     for policy in ["see", "talk", "own", "call", "broadcast"]:
         if config["dbus"]["system"] and config["dbus"]["system"][policy]:
             for rule in set(config["dbus"]["system"][policy]):
@@ -225,7 +226,15 @@ def setup_dbus_proxy(config):
             for rule in set(config["dbus"]["session"][policy]):
                 session_rules.extend(["--{}={}".format(policy, rule)])
 
-    if not system_rules and not session_rules:
+        other_buses = (
+            (k, v.get(policy, [])) for k, v in config["dbus"].items()
+            if k not in ["session", "system"] and v.get(policy, []) and exists(k)
+        )
+        for (bus_path, rules) in other_buses:
+            for rule in set(rules):
+                other_rules[bus_path].extend(["--{}={}".format(policy, rule)])
+
+    if not (system_rules or session_rules or other_rules):
         return None
 
     xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
@@ -251,6 +260,10 @@ def setup_dbus_proxy(config):
         config["mounts"]["ro"].append((system_proxy_bus, str(system_bus), "f"))
 
         args.extend(["unix:path={}".format(system_bus), system_proxy_bus])
+        if config["dbus"]["system"].get("log", False):
+            args.append("--log")
+        if config["dbus"]["system"].get("sloppy-names", False):
+            args.append("--sloppy-names")
         args.extend(["--filter"] + system_rules)
 
     if session_rules and session_bus:
@@ -262,9 +275,24 @@ def setup_dbus_proxy(config):
         config["environment"]["DBUS_SESSION_BUS_ADDRESS"] = 'unix:path={}'.format(bus_path)
 
         args.extend([session_bus, session_proxy_bus])
+        if config["dbus"]["session"].get("log", False):
+            args.append("--log")
+        if config["dbus"]["session"].get("sloppy-names", False):
+            args.append("--sloppy-names")
         args.extend(["--filter"] + session_rules)
 
+    for (bus_path, rules) in other_rules.items():
+        _, proxy_bus = tempfile.mkstemp(prefix="bus-proxy", dir=proxy_bus_dir)
 
+        # Add mount to config for binding proxy bus to the bus.
+        config["mounts"]["ro"].append((proxy_bus, bus_path, "f"))
+
+        args.extend(['unix:path={}'.format(bus_path), proxy_bus])
+        if config["dbus"][bus_path].get("log", False):
+            args.append("--log")
+        if config["dbus"][bus_path].get("sloppy-names", False):
+            args.append("--sloppy-names")
+        args.extend(["--filter"] + rules)
 
     args_fd = make_args_memfd(args)
     print(' '.join([basename(command)] + args), file=stderr)
