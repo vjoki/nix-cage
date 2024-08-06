@@ -209,10 +209,8 @@ def sorted_mounts(mounts):
         )
     )
 
-def setup_dbus_proxy(config):
+def setup_dbus_proxy(config, sync_fds=None):
     command = realpathwhich("xdg-dbus-proxy")
-    if not exists(command):
-        return None
 
     system_rules = []
     session_rules = []
@@ -235,7 +233,7 @@ def setup_dbus_proxy(config):
                 other_rules[bus_path].extend(["--{}={}".format(policy, rule)])
 
     if not (system_rules or session_rules or other_rules):
-        return None
+        return sync_fds
 
     xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
     proxy_bus_dir = xdg_runtime_dir / ".nix-cage-dbus-proxy"
@@ -244,15 +242,12 @@ def setup_dbus_proxy(config):
     system_bus = Path("/run/dbus/system_bus_socket")
     session_bus = environ.get("DBUS_SESSION_BUS_ADDRESS")
 
-    # Set up file descriptor for syncing xdg-dbus-proxy termination with bwrap. Use pipe, as
-    # bwrap calls close() on the fd on exit, while xdg-dbus-proxy waits until it is closed
-    # (other option would be to use a socket pair).
-    (r_fd, w_fd) = os.pipe()
-    os.set_inheritable(r_fd, True)
-    os.set_inheritable(w_fd, True)
-
+    if not sync_fds:
+        sync_fds = make_sync_fd()
+    (_, w_fd) = sync_fds
     args = ["--fd={}".format(w_fd)]
 
+    system_proxy_bus = None
     if system_rules and system_bus.exists():
         _, system_proxy_bus = tempfile.mkstemp(prefix="system-bus-proxy", dir=proxy_bus_dir)
 
@@ -266,6 +261,7 @@ def setup_dbus_proxy(config):
             args.append("--sloppy-names")
         args.extend(["--filter"] + system_rules)
 
+    session_proxy_bus = None
     if session_rules and session_bus:
         _, session_proxy_bus = tempfile.mkstemp(prefix="session-bus-proxy", dir=proxy_bus_dir)
 
@@ -281,8 +277,10 @@ def setup_dbus_proxy(config):
             args.append("--sloppy-names")
         args.extend(["--filter"] + session_rules)
 
+    proxy_buses = []
     for (bus_path, rules) in other_rules.items():
         _, proxy_bus = tempfile.mkstemp(prefix="bus-proxy", dir=proxy_bus_dir)
+        proxy_buses.append(proxy_bus)
 
         # Add mount to config for binding proxy bus to the bus.
         config["mounts"]["ro"].append((proxy_bus, bus_path, "f"))
@@ -294,15 +292,26 @@ def setup_dbus_proxy(config):
             args.append("--sloppy-names")
         args.extend(["--filter"] + rules)
 
-    args_fd = make_args_memfd(args)
     print(' '.join([basename(command)] + args), file=stderr)
+    try:
+        args_fd = make_args_memfd(args)
+        subprocess.Popen(
+            [basename(command)] + ["--args={}".format(args_fd)],
+            pass_fds=(w_fd, args_fd)
+        )
+    except:
+        if session_proxy_bus:
+            os.unlink(session_proxy_bus)
+        if system_proxy_bus:
+            os.unlink(system_proxy_bus)
+        for pb in proxy_buses:
+            os.unlink(pb)
+        (r_fd, w_fd) = sync_fds
+        os.close(r_fd)
+        os.close(w_fd)
+        raise
 
-    subprocess.Popen(
-        [basename(command)] + ["--args={}".format(args_fd)],
-        pass_fds=(w_fd, args_fd)
-    )
-
-    return r_fd
+    return sync_fds
 
 def make_args_memfd(args, name="args"):
     args_fd = os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
@@ -316,6 +325,17 @@ def make_args_memfd(args, name="args"):
     os.lseek(args_fd, 0, os.SEEK_SET)
 
     return args_fd
+
+# Set up file descriptor for syncing external sandboxing utils termination with bwrap. Use pipe,
+# as bwrap calls close() on the fd on exit, while the external utils simply wait until the fd is
+# closed (other option would be to use a socket pair).
+#
+# Reader (r_fd) goes to bwrap, while the writer (w_fd) is shared by the external utils.
+def make_sync_fd():
+    (r_fd, w_fd) = os.pipe()
+    os.set_inheritable(r_fd, True)
+    os.set_inheritable(w_fd, True)
+    return (r_fd, w_fd)
 
 def make_command(config):
     bwrap = realpathwhich("bwrap")
@@ -446,9 +466,11 @@ def main(arguments, rest=[]):
         config["arguments"]["bwrap"].append("--remount-ro")
         config["arguments"]["bwrap"].append("/")
 
-    sync_fd = setup_dbus_proxy(config)
-    if sync_fd:
-        config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(sync_fd)])
+    sync_fds = setup_dbus_proxy(config, None)
+
+    if sync_fds:
+        (r_fd, _) = sync_fds
+        config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(r_fd)])
 
     command, argv = make_command(config)
     execve(command, argv, environ)
