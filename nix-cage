@@ -209,6 +209,53 @@ def sorted_mounts(mounts):
         )
     )
 
+def setup_way_secure(config, sync_fds=None, app_id=None):
+    from socket import socket, AF_UNIX, SOCK_STREAM
+    command = realpathwhich("way-secure")
+
+    xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
+    socket_dir = xdg_runtime_dir / ".nix-cage-wayland"
+    socket_dir.mkdir(exist_ok=True)
+    _, security_context_socket = tempfile.mkstemp(prefix="security-context", dir=socket_dir)
+
+    sock = socket(family=AF_UNIX, type=SOCK_STREAM)
+    os.unlink(security_context_socket)
+    sock.bind(security_context_socket)
+    sock.listen()
+    sock.set_inheritable(True)
+    sock_fd = sock.fileno()
+
+    wayland_display = environ.get("WAYLAND_DISPLAY", "wayland-0")
+    config["mounts"]["ro"].append((
+        security_context_socket,
+        str(xdg_runtime_dir / wayland_display),
+        "f"
+    ))
+    config["environment"]["WAYLAND_DISPLAY"] = wayland_display
+
+    if not sync_fds:
+        sync_fds = make_sync_fd()
+    (_, w_fd) = sync_fds
+
+    args = [
+        "--socket-fd", str(sock_fd),
+        "--sandbox-engine", basename(__file__),
+        "--app-id", str(app_id),
+        "--close-fd",  str(w_fd)
+    ]
+    print(' '.join([basename(command)] + args), file=stderr)
+    try:
+        subprocess.Popen([basename(command)] + args, pass_fds=(w_fd, sock_fd))
+    except:
+        sock.close()
+        os.unlink(security_context_socket)
+        (r_fd, w_fd) = sync_fds
+        os.close(r_fd)
+        os.close(w_fd)
+        raise
+
+    return sync_fds
+
 def setup_dbus_proxy(config, sync_fds=None):
     command = realpathwhich("xdg-dbus-proxy")
 
@@ -468,6 +515,9 @@ def main(arguments, rest=[]):
 
     sync_fds = setup_dbus_proxy(config, None)
 
+    if arguments["wayland"]:
+        sync_fds = setup_way_secure(config, sync_fds, app_id=arguments["config"])
+
     if sync_fds:
         (r_fd, _) = sync_fds
         config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(r_fd)])
@@ -498,7 +548,8 @@ if __name__ == "__main__":
     p.add_argument("--seccomp", help="compiled seccomp BPF file")
     p.add_argument("--proc", help="mount procfs to PROC")
     p.add_argument("--devtmpfs", help="mount a new devtmpfs to DEVTMPFS")
-    p.add_argument("--ro-root", help="Read only root", action="store_true")
+    p.add_argument("--wayland", help="setup a Wayland security context", action="store_true")
+    p.add_argument("--ro-root", help="read only root", action="store_true")
     p.add_argument("--show-config", help="dumps config in JSON and exit", action="store_true")
     p.add_argument("--cd", "-C", help="change to directory before doing anything", default=getcwd())
 
