@@ -515,11 +515,15 @@ def make_command(config):
     if Path("flake.nix").exists() \
        or any((p / "flake.nix").exists() for p in Path().resolve().parents):
         shell = which("nix")
+        if shell is None:
+            raise RuntimeError("Could not find executable: nix")
         shell_flags = ["develop"] + config["arguments"]["nix-develop"] + [
             "--command", config["arguments"]["command"],
         ]
     else:
         shell = which(environ.get("SHELL", "bash"))
+        if shell is None:
+            raise RuntimeError("No SHELL defined and could not find executable: bash")
         shell_flags = ["-c", config["arguments"]["command"]] if config["arguments"]["command"] \
             else []
 
