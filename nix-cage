@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import fcntl
+import time
 from argparse import ArgumentParser
 from pathlib import Path
 from os import execve, getcwd, chdir
@@ -217,7 +218,7 @@ def setup_way_secure(config, sync_fds=None, app_id=None):
     xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
     socket_dir = xdg_runtime_dir / ".nix-cage-wayland"
     socket_dir.mkdir(exist_ok=True)
-    _, security_context_socket = tempfile.mkstemp(prefix="security-context", dir=socket_dir)
+    _, security_context_socket = tempfile.mkstemp(prefix="security-context-", dir=socket_dir)
 
     wayland_display = environ.get("WAYLAND_DISPLAY", "wayland-0")
     config["mounts"]["ro"].append((
@@ -243,27 +244,45 @@ def setup_way_secure(config, sync_fds=None, app_id=None):
     print(' '.join([basename(command)] + args), file=stderr)
 
     try:
-        is_fd_valid(sync_fds.w_fd)
-        os.unlink(security_context_socket)
-        with subprocess.Popen(
-                [command] + args,
-                pass_fds=(sync_fds.w_fd, w_ready_fd),
-                stderr=subprocess.STDOUT,
-                stdout=subprocess.PIPE
-        ) as p:
-            out, _ = p.communicate()
-            if p.returncode != 0:
-                raise RuntimeError("Creating wayland security context failed with return code {}:\n{}: {}".format(p.returncode, basename(command), out.decode('utf8')))
+        max_retries = 42
+        retries = 1
+        while True:
+            try:
+                is_fd_valid(sync_fds.w_fd)
+                os.unlink(security_context_socket)
+                with subprocess.Popen(
+                        [command] + args,
+                        pass_fds=(sync_fds.w_fd, w_ready_fd),
+                        stderr=subprocess.STDOUT,
+                        stdout=subprocess.PIPE
+                ) as p:
+                    out, _ = p.communicate()
+                    if p.returncode != 0:
+                        raise RuntimeError("Creating wayland security context failed with return code {}:\n{}: {}"
+                                           .format(p.returncode, basename(command), out.decode('utf8')))
 
-        is_fd_valid(r_ready_fd)
-        print("Waiting for {}...".format(basename(command)))
-        ready_resp = os.read(r_ready_fd, 1)
-        if ready_resp != b'\n':
-            raise RuntimeError("Unexpected return value in ready_fd: {}".format(ready_resp))
+                is_fd_valid(r_ready_fd)
+                print("Waiting for {}...".format(basename(command)))
+                ready_resp = os.read(r_ready_fd, 1)
+                if ready_resp != b'\n':
+                    raise RuntimeError("Unexpected return value in ready_fd: {}".format(ready_resp))
 
-        is_fd_valid(sync_fds.r_fd)
-        is_fd_valid(sync_fds.w_fd)
-        check_wayland_security_context(security_context_socket)
+                is_fd_valid(sync_fds.r_fd)
+                is_fd_valid(sync_fds.w_fd)
+                check_wayland_security_context(security_context_socket)
+
+                break
+            except WaylandSecurityContextException:
+                if retries <= max_retries:
+                    # Not clear whether its better to just do many retries fast, rather than few retries
+                    # with a backoff delay. So just do something kinda in between.
+                    delay_secs = 0.1 * 1.05 ** retries
+                    print("Failed to get a valid Wayland security context, retrying in {:.2}s...".format(delay_secs))
+                    time.sleep(delay_secs)
+                    retries = retries + 1
+                else:
+                    print("Giving up.")
+                    raise
     except:
         os.unlink(security_context_socket)
         os.close(sync_fds.r_fd)
@@ -274,6 +293,9 @@ def setup_way_secure(config, sync_fds=None, app_id=None):
         os.close(r_ready_fd)
 
     return (sync_fds, security_context_socket)
+
+class WaylandSecurityContextException(Exception):
+    """Invalid Wayland security context socket"""
 
 def check_wayland_security_context(security_context_socket):
     check_command = realpathwhich("wayland-info")
@@ -288,7 +310,10 @@ def check_wayland_security_context(security_context_socket):
         ) as p:
             out, err = p.communicate()
             if p.returncode != 0:
-                raise RuntimeError("Checking wayland security context socket failed with return code {}:\n{}: {}".format(p.returncode, basename(check_command), err.decode('utf8')))
+                raise WaylandSecurityContextException(
+                    "Checking wayland security context socket failed with return code {}:\n{}: {}"
+                    .format(p.returncode, basename(check_command), err.decode('utf8'))
+                )
 
             # Nested security contexts are forbidden by the protocol, so this should suffice to
             # make sure we actually have a proper security context.
