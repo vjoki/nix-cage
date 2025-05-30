@@ -15,6 +15,7 @@ from json import load as json_unmarshal, dumps as json_marshal_str
 from pwd import getpwnam
 from string import Template
 from collections import defaultdict
+from typing import NamedTuple
 
 mount_suffixes = [
     "ro",
@@ -211,20 +212,12 @@ def sorted_mounts(mounts):
     )
 
 def setup_way_secure(config, sync_fds=None, app_id=None):
-    from socket import socket, AF_UNIX, SOCK_STREAM
     command = realpathwhich("way-secure")
 
     xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
     socket_dir = xdg_runtime_dir / ".nix-cage-wayland"
     socket_dir.mkdir(exist_ok=True)
     _, security_context_socket = tempfile.mkstemp(prefix="security-context", dir=socket_dir)
-
-    sock = socket(family=AF_UNIX, type=SOCK_STREAM)
-    os.unlink(security_context_socket)
-    sock.bind(security_context_socket)
-    sock.listen()
-    sock.set_inheritable(True)
-    sock_fd = sock.fileno()
 
     wayland_display = environ.get("WAYLAND_DISPLAY", "wayland-0")
     config["mounts"]["ro"].append((
@@ -236,26 +229,71 @@ def setup_way_secure(config, sync_fds=None, app_id=None):
 
     if not sync_fds:
         sync_fds = make_sync_fd()
-    (_, w_fd) = sync_fds
+
+    (r_ready_fd, w_ready_fd) = os.pipe()
+    os.set_inheritable(w_ready_fd, True)
 
     args = [
-        "--socket-fd", str(sock_fd),
+        "--socket-path", security_context_socket,
         "--sandbox-engine", basename(__file__),
         "--app-id", str(app_id),
-        "--close-fd",  str(w_fd)
+        "--close-fd",  str(sync_fds.w_fd),
+        "--ready-fd",  str(w_ready_fd),
     ]
     print(' '.join([basename(command)] + args), file=stderr)
-    try:
-        subprocess.Popen([basename(command)] + args, pass_fds=(w_fd, sock_fd))
-    except:
-        sock.close()
-        os.unlink(security_context_socket)
-        (r_fd, w_fd) = sync_fds
-        os.close(r_fd)
-        os.close(w_fd)
-        raise
 
-    return sync_fds
+    try:
+        is_fd_valid(sync_fds.w_fd)
+        os.unlink(security_context_socket)
+        with subprocess.Popen(
+                [command] + args,
+                pass_fds=(sync_fds.w_fd, w_ready_fd),
+                stderr=subprocess.STDOUT,
+                stdout=subprocess.PIPE
+        ) as p:
+            out, _ = p.communicate()
+            if p.returncode != 0:
+                raise RuntimeError("Creating wayland security context failed with return code {}:\n{}: {}".format(p.returncode, basename(command), out.decode('utf8')))
+
+        is_fd_valid(r_ready_fd)
+        print("Waiting for {}...".format(basename(command)))
+        ready_resp = os.read(r_ready_fd, 1)
+        if ready_resp != b'\n':
+            raise RuntimeError("Unexpected return value in ready_fd: {}".format(ready_resp))
+
+        is_fd_valid(sync_fds.r_fd)
+        is_fd_valid(sync_fds.w_fd)
+        check_wayland_security_context(security_context_socket)
+    except:
+        os.unlink(security_context_socket)
+        os.close(sync_fds.r_fd)
+        os.close(sync_fds.w_fd)
+        raise
+    finally:
+        os.close(w_ready_fd)
+        os.close(r_ready_fd)
+
+    return (sync_fds, security_context_socket)
+
+def check_wayland_security_context(security_context_socket):
+    check_command = realpathwhich("wayland-info")
+    if Path(check_command).exists():
+        xdg_runtime_dir = Path(environ.get("XDG_RUNTIME_DIR", "/run/user/{UID}".format(**environ)))
+        with subprocess.Popen(
+                [check_command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"WAYLAND_DISPLAY": security_context_socket,
+                     "XDG_RUNTIME_DIR": xdg_runtime_dir}
+        ) as p:
+            out, err = p.communicate()
+            if p.returncode != 0:
+                raise RuntimeError("Checking wayland security context socket failed with return code {}:\n{}: {}".format(p.returncode, basename(check_command), err.decode('utf8')))
+
+            # Nested security contexts are forbidden by the protocol, so this should suffice to
+            # make sure we actually have a proper security context.
+            if "wp_security_context_manager_v1" in out.decode('utf8'):
+                raise RuntimeError("Invalid wayland security context, allows access to wp_security_context_manager_v1!")
 
 def setup_dbus_proxy(config, sync_fds=None):
     command = realpathwhich("xdg-dbus-proxy")
@@ -292,8 +330,7 @@ def setup_dbus_proxy(config, sync_fds=None):
 
     if not sync_fds:
         sync_fds = make_sync_fd()
-    (_, w_fd) = sync_fds
-    args = ["--fd={}".format(w_fd)]
+    args = ["--fd={}".format(sync_fds.w_fd)]
 
     system_proxy_bus = None
     if system_rules and system_bus.exists():
@@ -343,10 +380,18 @@ def setup_dbus_proxy(config, sync_fds=None):
     print(' '.join([basename(command)] + args), file=stderr)
     try:
         args_fd = make_args_memfd(args)
+        is_fd_valid(sync_fds.w_fd)
         subprocess.Popen(
             [basename(command)] + ["--args={}".format(args_fd)],
-            pass_fds=(w_fd, args_fd)
+            pass_fds=(sync_fds.w_fd, args_fd)
         )
+
+        # xdg-dbus-proxy writes b'x' to the sync_fd once it's ready, so we check that as well.
+        print("Waiting for {}...".format(basename(command)))
+        is_fd_valid(sync_fds.r_fd)
+        ready_resp = os.read(sync_fds.r_fd, 1)
+        if ready_resp != b'x':
+            raise RuntimeError("{}: Unexpected return value in ready_fd: {}".format(command, ready_resp))
     except:
         if session_proxy_bus:
             os.unlink(session_proxy_bus)
@@ -354,9 +399,8 @@ def setup_dbus_proxy(config, sync_fds=None):
             os.unlink(system_proxy_bus)
         for pb in proxy_buses:
             os.unlink(pb)
-        (r_fd, w_fd) = sync_fds
-        os.close(r_fd)
-        os.close(w_fd)
+        os.close(sync_fds.r_fd)
+        os.close(sync_fds.w_fd)
         raise
 
     return sync_fds
@@ -374,6 +418,10 @@ def make_args_memfd(args, name="args"):
 
     return args_fd
 
+class SyncFds(NamedTuple):
+    r_fd: int
+    w_fd: int
+
 # Set up file descriptor for syncing external sandboxing utils termination with bwrap. Use pipe,
 # as bwrap calls close() on the fd on exit, while the external utils simply wait until the fd is
 # closed (other option would be to use a socket pair).
@@ -383,7 +431,14 @@ def make_sync_fd():
     (r_fd, w_fd) = os.pipe()
     os.set_inheritable(r_fd, True)
     os.set_inheritable(w_fd, True)
-    return (r_fd, w_fd)
+    return SyncFds(r_fd, w_fd)
+
+# Raise OSError if fd is not valid.
+def is_fd_valid(fd):
+    # cheaper than os.fstat / os.stat
+    #
+    # returns 0 if inheritable, 1 == fcntl.FD_CLOEXEC
+    fcntl.fcntl(fd, fcntl.F_GETFD)
 
 def get_dev_paths(dev_from_sys_uevent):
     import re
@@ -563,14 +618,22 @@ def main(arguments, rest=[]):
 
     sync_fds = setup_dbus_proxy(config, None)
 
+    security_context_socket = None
     if arguments["wayland"]:
-        sync_fds = setup_way_secure(config, sync_fds, app_id=arguments["config"])
+        (sync_fds, security_context_socket) = setup_way_secure(config, sync_fds, app_id=arguments["config"])
 
     if sync_fds:
-        (r_fd, _) = sync_fds
-        config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(r_fd)])
+        config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(sync_fds.r_fd)])
 
     command, argv = make_command(config)
+
+    # Double check that sync_fds is still functional.
+    is_fd_valid(sync_fds.r_fd)
+    is_fd_valid(sync_fds.w_fd)
+
+    if arguments["wayland"]:
+        check_wayland_security_context(security_context_socket)
+
     execve(command, argv, environ)
 
 
