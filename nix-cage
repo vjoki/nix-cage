@@ -306,8 +306,8 @@ def check_wayland_security_context(security_context_socket):
                 [check_command],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env={"WAYLAND_DISPLAY": security_context_socket,
-                     "XDG_RUNTIME_DIR": xdg_runtime_dir}
+                env={"WAYLAND_DISPLAY": str(security_context_socket),
+                     "XDG_RUNTIME_DIR": str(xdg_runtime_dir)}
         ) as p:
             out, err = p.communicate()
             if p.returncode != 0:
