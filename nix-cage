@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import fcntl
 import time
+from io import TextIOWrapper, BytesIO
 from argparse import ArgumentParser
 from pathlib import Path
 from os import execve, getcwd, chdir
@@ -562,9 +563,33 @@ def make_command(config):
 
     return bwrap, argv
 
-def load_config(config, arguments, rest):
-    if exists(arguments["config"]):
-        with open(arguments["config"], "r") as stream:
+# We want predictable names for fds too.
+class ConfigFileHandle:
+    def __init__(self, filename_or_fd) -> None:
+        self.file_obj: TextIOWrapper | None = None
+        self.name = None
+
+        try:
+            with open(int(filename_or_fd), "rb") as fd:
+                contents = fd.read()
+            file_hash = hash(contents).to_bytes(8, signed=True).hex()
+            self.file_obj = TextIOWrapper(BytesIO(contents))
+            self.name = f"fd:{file_hash}"
+        except ValueError:
+            self.file_obj = open(filename_or_fd, "rt")
+            self.name = basename(str(filename_or_fd))
+
+    def __enter__(self):
+        return self.file_obj
+
+    def __exit__(self, exec_ty, exec_val, exec_tb):
+        if self.file_obj is not None:
+            self.file_obj.close()
+            self.file_obj = None
+
+def load_config(config, config_handle, arguments, rest):
+    if config_handle is not None:
+        with config_handle as stream:
             overlay_config = json_unmarshal(stream)
             config = merge(overlay_config, config, mode=overlay_config.get("mode", config["mode"]))
 
@@ -619,7 +644,13 @@ def main(arguments, rest=[]):
     arguments["cd"] = abspath(expanduser(arguments["cd"]))
     chdir(arguments["cd"])
 
-    config = load_config(get_default_config(), arguments, rest)
+    config_handle = None
+    config_name = None
+    if arguments["config"]:
+        config_handle = ConfigFileHandle(arguments["config"])
+        config_name = config_handle.name
+
+    config = load_config(get_default_config(), config_handle, arguments, rest)
 
     if arguments["show_config"]:
         print(json_marshal_pretty_str(config))
@@ -650,7 +681,7 @@ def main(arguments, rest=[]):
 
     security_context_socket = None
     if arguments["wayland"]:
-        (sync_fds, security_context_socket) = setup_way_secure(config, sync_fds, app_id=arguments["config"])
+        (sync_fds, security_context_socket) = setup_way_secure(config, sync_fds, app_id=config_name)
 
     if sync_fds:
         config["arguments"]["bwrap"].extend(["--sync-fd", "{}".format(sync_fds.r_fd)])
