@@ -284,7 +284,7 @@ def setup_way_secure(config, sync_fds=None, app_id=None):
                 else:
                     print("Giving up.")
                     raise
-    except:
+    except:  # noqa: E722
         os.unlink(security_context_socket)
         os.close(sync_fds.r_fd)
         os.close(sync_fds.w_fd)
@@ -418,7 +418,7 @@ def setup_dbus_proxy(config, sync_fds=None):
         ready_resp = os.read(sync_fds.r_fd, 1)
         if ready_resp != b'x':
             raise RuntimeError("{}: Unexpected return value in ready_fd: {}".format(command, ready_resp))
-    except:
+    except:  # noqa: E722
         if session_proxy_bus:
             os.unlink(session_proxy_bus)
         if system_proxy_bus:
