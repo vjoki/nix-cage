@@ -238,6 +238,7 @@ def setup_way_secure(config, sync_fds=None, app_id=None):
         "--socket-path", security_context_socket,
         "--sandbox-engine", basename(__file__),
         "--app-id", str(app_id),
+        "--instance-id", bytes.hex(os.urandom(5)),
         "--close-fd",  str(sync_fds.w_fd),
         "--ready-fd",  str(w_ready_fd),
     ]
